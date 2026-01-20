@@ -1,0 +1,1272 @@
+---
+title: "SDS 4030 FINAL"
+author: "Ethan Matsubayashi & Dmitri De Freitas"
+subtitle: Productivity Final Project
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document:
+    latex_engine: xelatex
+fontsize: 11pt
+header-includes:
+- \usepackage{hyperref}
+- \hypersetup{pdfpagemode={UseNone}, pdfstartview=}
+- \usepackage{amsthm}
+- \theoremstyle{definition}
+- \newtheorem{problem}{Problem}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = "center", fig.height = 4, fig.width = 5)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 68), tidy = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+set.seed(0)
+```
+
+```{r}
+data <- read.table("productivity.txt", header = TRUE)
+head(data)
+```
+
+```{r}
+summary(data)
+```
+
+# 1: Exact & Asymptotic Tests
+
+```{r}
+full_model <- lm(actual_productivity ~ targeted_productivity + smv + over_time + incentive + idle_time + idle_men + no_of_style_change + no_of_workers, data = data)
+summary(full_model)
+```
+
+```{r}
+red_model <- lm(actual_productivity ~ smv + no_of_workers + idle_men + no_of_style_change, data = data)
+constraints <-  c("1000*smv + 3000*no_of_workers = 3", "1000*idle_men - 300*no_of_style_change = 3")
+```
+
+## Asymptotic Wald F-Test
+
+```{r}
+library(car)
+lh_obs = linearHypothesis(full_model, constraints, test = "F")
+lh_obs
+```
+
+The asymptotic p value for the Wald's F Test statistic is .9967, which means we fail to reject the null hypothesis.
+
+## Exact Bootstrap Test
+
+```{r}
+n_boot = 1000
+
+mu_hat = fitted(full_model)
+sigma_hat = summary(full_model)$sigma
+
+obs_stat <- lh_obs$F[2]
+```
+
+```{r}
+boot_stats <- numeric(n_boot)
+for (i in 1:n_boot) {
+  y_boot <- mu_hat + rnorm(length(mu_hat), 0, sigma_hat)
+
+  fit_boot <- lm(actual_productivity ~ targeted_productivity + smv + over_time + incentive + idle_time + idle_men + no_of_style_change + no_of_workers, data = within(data, actual_productivity <- y_boot))
+  lh_boot <- linearHypothesis(fit_boot, constraints, test = "F")
+  boot_stats[i] <- lh_boot$F[2]  
+}
+
+p_value <- mean(boot_stats >= obs_stat)
+cat("Bootstrap p-value:", p_value, "\n")
+```
+
+We test the joint null hypothesis that the two specified linear combinations of regression coefficients are equal to 3. The alternative hypothesis is that at least one of these constraints does not hold.
+
+The bootstrapped P value for the Wald's F test is .997, so we fail to reject the null hypothesis. This closely matches the result of our asymptotic test, which further confirms that accuracy of our tests, and also implies this is a sufficiently large dataset where asymptotic values approximate the exact values.
+
+The Wald F test assumes linearity and homoskedasticity, which works best on a large sample size. The Bootstrap Test uses the same F-statistic, but instead of assuming the distribution, you approximate the sampling distribution by simulation rather than relying on its asymptotic form.
+
+# 2: Standard Error Estimates & Coefficient CI's
+
+### Jackknife SE
+
+```{r}
+X = model.matrix(full_model)
+n = nrow(X)
+p = ncol(X)
+
+betajack = matrix(NA, n, p)
+for (i in 1:n) {
+  jackfit = lm(actual_productivity ~ targeted_productivity + smv + over_time + incentive + idle_time + idle_men + no_of_style_change + no_of_workers, data = data[-i, ])
+  betajack[i, ] = jackfit$coefficients
+}
+jackknife_se = apply(betajack, 2, sd) * sqrt((n - 1)^2 / n)
+print(jackknife_se)
+```
+
+### Nonparametric Bootstrap SE
+
+```{r}
+nboot = 1000
+betaboot = matrix(NA, nboot, p)
+for (b in 1:nboot) {
+  idx = sample(1:n, replace = TRUE)
+  bootfit = lm(actual_productivity ~ targeted_productivity + smv + over_time + incentive + idle_time + idle_men + no_of_style_change + no_of_workers, data = data[idx, ])
+  betaboot[b, ] = bootfit$coefficients
+}
+
+bootstrap_se = apply(betaboot, 2, sd)
+print(bootstrap_se)
+```
+
+### OLSE
+
+```{r}
+summary(full_model)
+```
+
+The Jackknife and Nonparametric bootstrap methods for finding standard errors yield similar results which are not very close to the SE's obtained through the OLS method. The jackknife standard errors are generally larger than the OLS standard errors, particularly for incentive and idle_men. This suggests that the OLS method may underestimate the variability of these coefficients when certain observations are omitted. The bootstrap standard errors fall between the jackknife and OLS estimates, providing a more robust measure of uncertainty that accounts for sampling variability without being overly conservative.
+
+```{r}
+apply_bootstrap_CIs <- function(betaboot) {
+  p = ncol(betaboot)
+  nboot = nrow(betaboot)
+  ci_list = vector("list", p)
+  for (j in 1:p) {
+    ci_percentile = quantile(betaboot[, j], c(0.025, 0.975))
+
+    
+    boot_mean = mean(betaboot[, j])
+    boot_se = sd(betaboot[, j])
+    ci_normal = boot_mean + c(-1, 1)*1.96*boot_se
+
+    
+    ci_basic = 2*boot_mean - quantile(betaboot[, j], c(0.975, 0.025))
+    ci_list[[j]] = list(
+      Percentile = ci_percentile,
+      Normal = ci_normal,
+      Basic = ci_basic
+    )
+  }
+  return(ci_list)
+}
+
+ci_list = apply_bootstrap_CIs(betaboot)
+```
+
+```{r}
+for (j in 1:length(ci_list)) {
+  cat("\nCoefficient", j, "\n")
+  print(ci_list[[j]])
+}
+```
+
+The results from the 3 methods are similar, but not identical. All three bootstrap CI methods (normal, percentile, basic) produce similar intervals for most coefficients, indicating approximate symmetry in the bootstrap distributions. However, for incentive, the percentile CI is slightly shifted to the left compared to the normal CI, suggesting mild left skewness in its sampling distribution. Compared to the OLS CIs, the bootstrap intervals are slightly wider, reflecting greater uncertainty estimation when model assumptions may not hold perfectly.
+
+The OLSE rely on homoscedasticity and normality assumptions, but jackknife and nonparametric bootstrap estimates don't. Thus, the former two remain valid under weaker distribution assumptions.
+
+Specifically, the coefficients for idle_time and incentive intervals are worth noting, as they both show atypical variability across resampling methods. Particularly, the bootstrap standard errors are substantially larger than both its OLS and jackknife counterparts, and the corresponding bootstrap-normal confidence interval is dramatically wider than the percentile and basic intervals. This indicates instability in the coefficient distributions. This could be caused by influential observations, skew or sparseness in the sample or collinearity with related predictors, which are amplified by the resampling of high-leverage points that nonparametric bootstrap can do.
+
+# 3: Nonparametric Tests
+
+```{r}
+# Test 1: Overall statistical significance - Permutation F-test
+# H0: All regression coefficients (except intercept) are zero
+
+# Observed F-statistic from full model
+f_obs <- summary(full_model)$fstatistic[1]
+
+# Permutation test
+set.seed(123)
+n_perm <- 1000
+f_perm <- numeric(n_perm)
+
+for (i in 1:n_perm) {
+  y_perm <- sample(data$actual_productivity)
+  perm_model <- lm(y_perm ~ targeted_productivity + smv + over_time + 
+                    incentive + idle_time + idle_men + no_of_style_change + 
+                    no_of_workers, data = data)
+    f_perm[i] <- summary(perm_model)$fstatistic[1]
+}
+
+# Permutation p-value
+pval_perm_overall <- mean(f_perm >= f_obs)
+
+# Theoretical p-value from F-distribution
+pval_theoretical_overall <- pf(f_obs, 
+                               summary(full_model)$fstatistic[2],
+                               summary(full_model)$fstatistic[3], 
+                               lower.tail = FALSE)
+
+cat("=== Overall Significance Test ===\n")
+cat("Observed F-statistic:", f_obs, "\n")
+cat("Permutation p-value:", pval_perm_overall, "\n")
+cat("Theoretical p-value:", pval_theoretical_overall, "\n\n")
+```
+
+```{r}
+# Visualize permutation distribution
+hist(f_perm, breaks = 30, main = "Permutation Distribution of F-statistic",
+     xlab = "F-statistic", col = "lightblue", probability = TRUE)
+abline(v = f_obs, col = "red", lwd = 2, lty = 2)
+legend("topright", legend = c("Observed F"), col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Test 2: Single covariate test - incentive effect
+# Permutation test for incentive coefficient
+
+# Observed t-statistic for incentive
+t_obs_incentive <- summary(full_model)$coefficients["incentive", "t value"]
+
+# Permutation test for incentive
+t_perm_incentive <- numeric(n_perm)
+
+for (i in 1:n_perm) {
+  # Permute the incentive variable
+  data_perm <- data
+  data_perm$incentive <- sample(data$incentive)
+  
+  # Fit model with permuted incentive
+  perm_model_incentive <- lm(actual_productivity ~ targeted_productivity + smv + 
+                              over_time + incentive + idle_time + idle_men + 
+                              no_of_style_change + no_of_workers, 
+                              data = data_perm)
+  
+  # Store t-statistic for incentive
+  t_perm_incentive[i] <- summary(perm_model_incentive)$coefficients["incentive", "t value"]
+}
+
+# Permutation p-value (two-tailed)
+pval_perm_incentive <- mean(abs(t_perm_incentive) >= abs(t_obs_incentive))
+
+# Theoretical p-value from t-distribution
+pval_theoretical_incentive <- summary(full_model)$coefficients["incentive", "Pr(>|t|)"]
+
+cat("=== Incentive Effect Test ===\n")
+cat("Observed t-statistic:", t_obs_incentive, "\n")
+cat("Permutation p-value:", pval_perm_incentive, "\n")
+cat("Theoretical p-value:", pval_theoretical_incentive, "\n\n")
+```
+
+```{r}
+# Visualize permutation distribution
+hist(t_perm_incentive, breaks = 30, 
+     main = "Permutation Distribution of t-statistic (incentive)",
+     xlab = "t-statistic", col = "lightblue", probability = TRUE)
+abline(v = t_obs_incentive, col = "red", lwd = 2, lty = 2)
+abline(v = -t_obs_incentive, col = "red", lwd = 2, lty = 2)
+legend("topright", legend = c("Observed t"), col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Comparison
+cat("=== Comparison ===\n")
+cat("Overall test: Permutation p-value =", pval_perm_overall, 
+    "vs Theoretical p-value =", pval_theoretical_overall, "\n")
+cat("Incentive test: Permutation p-value =", pval_perm_incentive, 
+    "vs Theoretical p-value =", pval_theoretical_incentive, "\n\n")
+cat("The permutation p-values are based on the empirical null distribution.\n")
+cat("The theoretical p-values assume F/t distributions under standard assumptions.\n")
+cat("Similar values suggest the theoretical assumptions are reasonable.\n")
+```
+
+## Comparison of Permutation vs Theoretical P-values
+
+### Overall Significance Test (F-test)
+
+-   **Permutation p-value**: 0 (none of the 1,000 permutations produced an F-statistic as extreme as the observed value)
+-   **Theoretical p-value**: 2.94×10⁻⁶² (extremely small, essentially zero)
+-   **Comparison**: Both p-values are extremely small and lead to the same conclusion - we strongly reject the null hypothesis that all coefficients are zero. The permutation p-value of 0 indicates that the observed F-statistic (44.35) is far in the tail of the empirical null distribution, which aligns perfectly with the theoretical p-value.
+
+### Incentive Effect Test (t-test)
+
+-   **Permutation p-value**: 0.079
+-   **Theoretical p-value**: 0.0705
+-   **Comparison**: The two p-values are very similar (both hovering around 0.07), suggesting close agreement between the empirical and theoretical null distributions. Both tests indicate borderline significance - the effect is marginally significant at α = 0.10 but not quite significant at α = 0.05.
+
+### Overall Assessment
+
+The permutation p-values closely match the theoretical p-values obtained from the F and t distributions. This agreement suggests that:
+
+1.  **The theoretical assumptions are reasonable**: The close agreement suggests that the parametric F and t reference distributions provide accurate approximations to the empirical null distributions in this setting.
+
+2.  **Large sample size validates theory**: With n = 1,160 observations, the asymptotic theory underlying the F and t distributions provides an accurate approximation to the true sampling distribution.
+
+3.  **Robustness of inference**: Since both methods lead to the same conclusions, we can be confident in our statistical inferences. The parametric tests are not misleading us due to violated assumptions.
+
+The close correspondence between permutation-based (distribution-free) and theoretical (parametric) p-values validates our use of standard linear regression inference for this dataset.
+
+# 4: Transformations and Model Diagnostics
+
+```{r}
+par(mfrow = c(2, 2))
+plot(full_model)
+```
+
+Display the four standard diagnostic plots to assess linearity, normality, constant variance, and the presence of influential observations.
+
+```{r}
+plot(data$targeted_productivity, resid(full_model), 
+     xlab = "targeted_productivity", ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+plot(data$smv, resid(full_model), xlab = "smv", ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+plot(data$over_time, resid(full_model), xlab = "over_time", 
+     ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+plot(data$incentive, resid(full_model), xlab = "incentive", 
+     ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+plot(data$idle_time, resid(full_model), xlab = "idle_time", 
+     ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+plot(data$idle_men, resid(full_model), xlab = "idle_men", 
+     ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+plot(data$no_of_style_change, resid(full_model), 
+     xlab = "no_of_style_change", ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+plot(data$no_of_workers, resid(full_model), xlab = "no_of_workers", 
+     ylab = "Residuals", pch = 16)
+abline(h = 0, lty = 2, lwd = 2)
+```
+
+### Standardized Residuals
+
+```{r}
+std_residuals <- rstandard(full_model)
+```
+
+### Histogram with Normal Curve
+
+```{r}
+hist(std_residuals, breaks = 30, prob = TRUE, 
+     main = "Distribution of Standardized Residuals",
+     xlab = "Standardized Residuals")
+curve(dnorm(x, mean = mean(std_residuals), sd = sd(std_residuals)), 
+      add = TRUE, col = "red", lwd = 2)
+```
+
+### Statistical Normality Tests
+
+```{r}
+shapiro.test(std_residuals)
+```
+
+```{r}
+library(qqconf)
+qq_conf_plot(std_residuals, points_params = list(pch = 16, cex = 0.5))
+```
+
+**Assessment of Normality in Standardized Residuals:**
+
+Based on diagnostic testing of the linear model with log-transformed variables, the standardized residuals do not demonstrate approximate normality.
+
+**Evidence and Interpretation:**
+
+The density plot of standardized residuals shows a roughly bell-shaped distribution centered at zero with reasonable symmetry. However, the Shapiro-Wilk test yields a p-value of approximately 0, indicating statistical rejection of perfect normality. This apparent contradiction is resolved by considering the sample size effect; with n=1,160 observations, even trivial deviations from normality become statistically significant.
+
+The quantile-quantile (QQ) plot displays large deviations, especially at either end, indicating violation of normality. This is evident by the 95% confidence bands on the QQ confidence plot— our observed data points clearly fall beyond the 95% confidence threshold, meaning we can reject the null hypothesis of normality at alpha = 0.05, and thus must transform our data.
+
+### Box-Cox Response Transformation
+
+```{r}
+library(MASS)
+bc <- boxcox(full_model, lambda = seq(-3, 3, by = 0.1))
+lambda_hat <- bc$x[which.max(bc$y)]
+abline(h = max(bc$y) - qchisq(0.95, df = 1)/2, lty = 2)
+```
+
+The CI falls around lambda=2, which implies that a square-transformation is appropriate.
+
+```{r}
+sq <- lm(actual_productivity^2 ~ targeted_productivity + smv + over_time + 
+          incentive + idle_time + idle_men + no_of_style_change + 
+          no_of_workers, data = data)
+summary(sq)
+```
+
+```{r}
+sq_residuals <- rstandard(sq)
+qq_conf_plot(sq_residuals, points_params = list(pch = 16, cex = 0.5))
+```
+
+```{r}
+bc <- boxcox(sq, lambda = seq(-3, 3, by = 0.1))
+lambda_hat <- bc$x[which.max(bc$y)]
+abline(h = max(bc$y) - qchisq(0.95, df = 1)/2, lty = 2)
+```
+
+### Covariate Transformation
+
+```{r}
+data$log_smv <- log(data$smv)
+data$log_over_time <- log(data$over_time + 1)
+data$log_incentive <- log(data$incentive + 1)
+data$log_no_of_workers <- log(data$no_of_workers + 1)
+data$log_targeted_productivity <- log(data$targeted_productivity + 1)
+
+
+
+transformed <- lm(actual_productivity^2 ~ log_targeted_productivity + log_smv + 
+                   log_over_time + log_incentive + idle_time + idle_men + 
+                   no_of_style_change + log_no_of_workers, data = data)
+
+transformed_residuals <- rstandard(transformed)
+qq_conf_plot(transformed_residuals, points_params = list(pch = 16, cex = 0.5))
+```
+
+```{r}
+summary(transformed)
+```
+
+Summary of results:
+
+Initial diagnostics revealed violations of linearity, constant variance, and normality assumptions in the original model.
+
+Box-Cox transformation indicated λ ≈ 2.0 (95% CI: [1.7, 2.3]), leading to a square transformation of the response variable (Y²).
+
+Covariate transformations were applied to smv, over_time, incentive, no_of_workers, and targeted_productivity using log(x+1) to address skewed distributions and non-linear relationships.
+
+Final model assessment shows improved diagnostics, though some deviation from normality remains in the tails. Approximately r round(100\*outside/n, 1)% of points fall outside the 95% simultaneous confidence bands, leading to rejection of the global null hypothesis of normality at α = 5%.
+
+Despite statistical rejection of normality, the large sample size (n = 1,160) makes even minor deviations statistically significant. The transformations have substantially improved model assumptions, making the final model suitable for inference.
+
+```{r}
+library(qqconf)
+library(MASS)
+library(car)
+library(glmnet)
+library(lme4)
+
+
+data$log_over_time <- log1p(data$over_time)
+data$log_incentive <- log1p(data$incentive)
+data$log_idle_time <- log1p(data$idle_time)
+data$sqrt_smv <- sqrt(data$smv)
+data$log_idle_men <- log1p(data$idle_men)
+data$no_of_style_change <- as.factor(data$no_of_style_change)
+
+
+transformed <- lm(actual_productivity^2 ~ 
+                    targeted_productivity +
+                    log_over_time +
+                    log_incentive +
+                    log_idle_time +
+                    sqrt_smv +
+                    log_idle_men +
+                    no_of_style_change +
+                    no_of_workers, data = data)
+
+transformed_residuals <- rstandard(transformed)
+qq_conf_plot(transformed_residuals, points_params = list(pch = 16, cex = 0.5))
+```
+
+# 5: Model Selection
+
+## MSPE Post Selection
+
+```{r}
+Y <- data$actual_productivity^2
+
+X <- data[, c("targeted_productivity","sqrt_smv","log_over_time","log_incentive",
+              "log_idle_time","log_idle_men","no_of_style_change","no_of_workers")]
+```
+
+```{r}
+n = dim(X)[1]
+P = dim(X)[2]
+train = sample(n, 0.6 * n)
+valid = sample(setdiff(1:n, train), 0.2 * n)
+test = setdiff(1:n, c(train, valid))
+MSPE = numeric(P)
+```
+
+```{r}
+for (p in P:1){
+  fit <- lm(Y[train] ~ ., data = X[train, 1:p, drop = FALSE])
+  predictions <- predict(fit, newdata = X[valid, 1:p, drop = FALSE])
+  MSPE[p] = mean((Y[valid] - predictions)^2)
+  ind = which.max(summary(fit)$coefficients[-1, 4])
+  if (ind != p){
+    X[,c(ind, p)] = X[,c(p, ind)]
+    names(X)[c(ind, p)] = names(X)[c(p, ind)]
+  }
+}
+plot(MSPE, type = "b", pch = 16, lwd = 4, ylab = "Mean Squared
+Prediction Error")
+p = which.min(MSPE)
+fit = lm(Y ~ ., X[,1:p, drop = FALSE], test)
+summary(fit)
+```
+
+MSPE decreases sharply up to a small model and then flattens, with minimal gains beyond 3–4 predictors; a 7-variable model is selected as a parsimonious choice near the MSPE minimum. The MSPE-optimal model retains targeted productivity and incentives as strong predictors, with SMV contributing modest predictive value, while variables such as overtime and idle time do not meaningfully improve out-of-sample performance. The overall F-statistic is significant, indicating that the selected predictors explain variation in the response beyond the intercept-only model.
+
+# 6: Ridge Regression
+
+```{r}
+library(car)
+vif(transformed)
+```
+
+```{r}
+train = c(train, valid)
+X = as.matrix(X)
+
+cv.ridge = cv.glmnet(X[train,], Y[train], nfolds = 5, alpha = 0)
+
+ridge = glmnet(X[train,], Y[train], alpha = 0, lambda = cv.ridge$lambda.min)
+
+pred = predict(ridge, newx = X[test,], s = cv.ridge$lambda.min)
+MSPE.test = mean((Y[test] - pred)^2)
+MSPE.test
+
+print(ridge$beta)
+```
+
+```{r}
+nboot = 10000
+P <- nrow(ridge$beta)
+beta <- matrix(0, nboot, P)
+colnames(beta) <- rownames(ridge$beta)
+
+
+for (i in 1:nboot)
+{
+  ind = sample(train, replace = TRUE)  
+  beta[i,] = as.vector(glmnet(X[ind,], Y[ind], alpha = 0, lambda = cv.ridge$lambda.min)$beta)
+}
+
+SE = apply(beta, 2, sd)
+print(SE)
+
+plot(beta[, c("targeted_productivity", "sqrt_smv")],
+     xlab = "Bootstrap Ridge Estimates for targeted_productivity",
+     ylab = "Bootstrap Ridge Estimates for sqrt_smv",
+     pch = 16, cex = 0.5)
+
+abline(h = 0, lty = 2, lwd = 2)
+abline(v = 0, lty = 2, lwd = 2)
+
+```
+
+```{r}
+ridge = glmnet(X[train,], Y[train], alpha = 0)
+plot(ridge)
+
+```
+
+```{r}
+cv.ridge = cv.glmnet(X[train,], Y[train], alpha = 0, nfolds = 5)
+plot(cv.ridge)
+```
+
+Takeaways:
+
+One predictor carries most of the explanatory power
+
+Ridge improves performance by shrinking noisy effects and stabilizing correlated coefficients.
+
+Compared to OLS, ridge regression coefficients are biased toward zero but exhibit substantially smaller standard errors, reflecting reduced variance in the presence of multicollinearity.
+
+# 7: Lasso Regression
+
+```{r}
+train = c(train, valid)
+X = as.matrix(X)
+
+cv.lasso = cv.glmnet(X[train,], Y[train], nfolds = 5, alpha = 1)
+
+lasso = glmnet(X[train,], Y[train], alpha = 1, lambda = cv.lasso$lambda.min)
+
+library(car)
+vif(transformed)
+
+pred = predict(lasso, newx = X[test,], s = cv.lasso$lambda.min)
+MSPE.test = mean((Y[test] - pred)^2)
+MSPE.test
+
+print(lasso$beta)
+
+plot(glmnet(X[train,], Y[train], alpha = 1), xvar = "lambda")
+plot(cv.lasso)
+
+nboot = 10000
+P = ncol(X)
+
+beta = matrix(0, nboot, P)
+colnames(beta) = colnames(X)
+
+for (i in 1:nboot)
+{
+  ind = sample(train, replace = TRUE)  
+  beta[i,] = as.vector(glmnet(X[ind,], Y[ind], alpha = 1, lambda = cv.lasso$lambda.min)$beta)
+}
+
+SE = apply(beta, 2, sd)
+print(SE)
+
+plot(beta[, 1:2],
+     xlab = paste("Bootstrap Lasso Estimates for", colnames(X)[1]),
+     ylab = paste("Bootstrap Lasso Estimates for", colnames(X)[2]),
+     pch = 16, cex = 0.5)
+abline(h = 0, lty = 2, lwd = 2)
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+The lasso regression exhibits uneven shrinkage, with multiple coefficients going close to zero. The coefficient paths and cross-validation results show that only a small subset of predictors—most notably targeted_productivity—retain meaningful magnitude, while others are heavily reduced.
+
+# 8: Interaction Effects
+
+Investigate the interaction effects between team and all available quantitative covariates on the response variable.
+
+```{r}
+fit = lm(actual_productivity^2 ~ team * (targeted_productivity + sqrt_smv +
+                                   log_over_time + log_incentive +
+                                   log_idle_time + log_idle_men +
+                                   no_of_style_change + no_of_workers), data = data)
+summary(fit)
+
+```
+
+```{r}
+anova(fit)
+```
+
+targeted_productivity, log_incentive, log_idle_men, no_of_style_change, no_of_workers and sqrt_smv differs by team significantly.
+
+```{r}
+drop1(fit, test = "F")
+```
+
+```{r}
+final_model <- lm(actual_productivity^2 ~ team +
+  targeted_productivity + sqrt_smv +
+  log_over_time + log_incentive + log_idle_time + log_idle_men +
+  no_of_style_change + no_of_workers +
+  team:targeted_productivity + team:sqrt_smv + team:no_of_workers,
+  data = data)
+
+summary(final_model)
+```
+
+### **Final Model Coefficient Interpretation**
+
+**Intercept**: Expected value of the squared response when all quantitative covariates are zero.
+
+**team**: How the response changes for the non-reference team when all quantitative predictors are zero.
+
+**Main effects (targeted_productivity, sqrt_smv, log_incentive, log_idle_time, log_idle_men, no_of_style_change, no_of_workers)**: These represent the effects of each predictor for the reference team.
+
+**team × targeted_productivity**: The effect of targeted productivity on actual productivty differs by team, implying that certain teams are better at achieving their productivity goals.
+
+**team × sqrt_smv**: The impact of SMV on the response varies by team.
+
+**team × no_of_workers**: The effect of the number of workers on productivity varies by team.
+
+# 9: Mixed Effects Model
+
+```{r}
+data$team       <- factor(data$team)
+data$department <- factor(data$department)
+
+data$date <- as.Date(data$date, format = "%m/%d/%Y")
+data$date_f <- factor(data$date)
+
+data$log_over_time <- log1p(data$over_time)
+data$log_incentive <- log1p(data$incentive)
+data$log_idle_time <- log1p(data$idle_time)
+data$sqrt_smv <- sqrt(data$smv)
+data$log_idle_men <- log1p(data$idle_men)
+
+
+data$y <- data$actual_productivity^2
+```
+
+```{r}
+fit = lmer(y ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive +
+    log_idle_time + log_idle_men + no_of_style_change + no_of_workers
+    + (1 | team) + (1 | department) + (1 | date_f), data)
+
+sigma = data.frame(summary(fit)$varcor)$sdcor
+names(sigma) = data.frame(summary(fit)$varcor)$grp
+
+ICC = sigma^2 / sum(sigma^2)
+print(ICC)
+summary(fit, correlation = FALSE)
+```
+
+## Box Cox
+
+```{r}
+lambda = seq(0, 1, 0.01)
+loglik = numeric(101)
+for (i in 1:101){
+  if (lambda[i] == 0){
+    Ypower = log(Y)
+  }
+  else{
+    Ypower = (Y^lambda[i] - 1) / lambda[i]
+  }
+  power = lmer(Ypower ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive +
+    log_idle_time + log_idle_men + no_of_style_change + no_of_workers
+    + (1 | team) + (1 | department) + (1 | date_f), data, REML= FALSE)
+  loglik[i] = logLik(power)[1] + (lambda[i] - 1) * sum(log(Y))
+}
+```
+
+```{r}
+alpha = 0.05
+CI = range(lambda[loglik > max(loglik) - qchisq(alpha, 1, lower.tail = FALSE) / 2])
+print(CI)
+plot(lambda, loglik, "l", xlab = expression(lambda), ylab = "
+Profile Log-Likelihood", lwd = 4)
+abline(h = max(loglik) - qchisq(0.95, 1) / 2, lty = 2, lwd = 4)
+abline(v = CI, lty = 2, lwd = 4)
+```
+
+The box-cox likelihood yields an interval of lambda=1, indicating no further transformation is needed.
+
+## Likelihood Ratio for Fixed Effects
+
+```{r}
+full = lmer(y ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive + log_idle_time + log_idle_men + no_of_style_change + no_of_workers + (1 | team) + (1 | department) + (1 | date_f), data, REML = FALSE)
+```
+
+```{r}
+#targeted_productivity
+reduced = lmer(
+  y ~ sqrt_smv + log_over_time + log_incentive +
+    log_idle_time + log_idle_men + no_of_style_change + no_of_workers +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, 1, lower.tail = FALSE)
+print(c("targeted_productivity" = pvalue))
+
+#sqrt_smv
+reduced = lmer(
+  y ~ targeted_productivity + log_over_time + log_incentive +
+    log_idle_time + log_idle_men + no_of_style_change + no_of_workers +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, 1, lower.tail = FALSE)
+print(c("sqrt_smv" = pvalue))
+
+#log_over_time
+reduced = lmer(
+  y ~ targeted_productivity + sqrt_smv + log_incentive +
+    log_idle_time + log_idle_men + no_of_style_change + no_of_workers +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, 1, lower.tail = FALSE)
+print(c("log_over_time" = pvalue))
+
+#log_incentive (1 df)
+reduced = lmer(
+  y ~ targeted_productivity + sqrt_smv + log_over_time +
+    log_idle_time + log_idle_men + no_of_style_change + no_of_workers +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, 1, lower.tail = FALSE)
+print(c("log_incentive" = pvalue))
+
+#log_idle_time (1 df)
+reduced = lmer(
+  y ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive +
+    log_idle_men + no_of_style_change + no_of_workers +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, 1, lower.tail = FALSE)
+print(c("log_idle_time" = pvalue))
+
+#log_idle_men (1 df)
+reduced = lmer(
+  y ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive +
+    log_idle_time + no_of_style_change + no_of_workers +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, 1, lower.tail = FALSE)
+print(c("log_idle_men" = pvalue))
+
+#no_of_workers (1 df)
+reduced = lmer(
+  y ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive +
+    log_idle_time + log_idle_men + no_of_style_change +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, 1, lower.tail = FALSE)
+print(c("no_of_workers" = pvalue))
+
+#no_of_style_change (df = number of levels - 1, since it's a factor)
+df_style = nlevels(data$no_of_style_change) - 1
+
+reduced = lmer(
+  y ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive +
+    log_idle_time + log_idle_men + no_of_workers +
+    (1 | team) + (1 | department) + (1 | date_f),
+  data,
+  REML = FALSE
+)
+
+LR = -2 * (logLik(reduced)[1] - logLik(full)[1])
+pvalue = pchisq(LR, df_style, lower.tail = FALSE)
+print(c("no_of_style_change" = pvalue, "df" = df_style))
+```
+
+Likelihood ratio tests indicate that targeted productivity, SMV, incentives, and team size are statistically significant fixed effects, while overtime, idle time, idle workers, and style changes do not significantly improve model fit once team-, department-, and date-level clustering is accounted for.
+
+## ICC for Random Effects
+
+```{r}
+sigma = data.frame(summary(fit)$varcor)$sdcor
+names(sigma) = data.frame(summary(fit)$varcor)$grp
+ICC = sigma^2 / sum(sigma^2)
+print(ICC)
+```
+
+**Total Variance Explained:**
+
+Date: 2.57%
+
+-   correlation between two outcomes from the same date, after accounting for fixed effects and other random effects.
+
+Team: 3.03%
+
+-   Correlation between 2 outcomes from the same team.
+
+Department: 42.09%
+
+-   Correlation between two outcomes from the same department.
+
+Residual: 52.32%
+
+# 10: Heteroscedasticity Tests
+
+```{r}
+fit_lm <- lm(
+  y ~ targeted_productivity + sqrt_smv + log_over_time + log_incentive +
+    log_idle_time + log_idle_men + no_of_style_change + no_of_workers,
+  data = data
+)
+
+summary(fit_lm)
+par(mfrow = c(2, 2))
+
+plot(rstandard(fit_lm) ~ targeted_productivity, data,
+     ylab = "Standardized Residuals", pch = 16)
+abline(h = 0, lty = 2)
+
+plot(rstandard(fit_lm) ~ sqrt_smv, data,
+     ylab = "Standardized Residuals", pch = 16)
+abline(h = 0, lty = 2)
+
+plot(rstandard(fit_lm) ~ log_incentive, data,
+     ylab = "Standardized Residuals", pch = 16)
+abline(h = 0, lty = 2)
+
+plot(rstandard(fit_lm) ~ log_over_time, data,
+     ylab = "Standardized Residuals", pch = 16)
+abline(h = 0, lty = 2)
+
+```
+
+## Studentized Breusch-Pagan Test
+
+```{r}
+library(lmtest)
+bptest(fit_lm)
+```
+
+Strongly reject the null hypothesis of homoscedasticity. The variance of the random error terms is nonconstant as a function of at least one of the quantitative covariates
+
+## Brown-Forsythe Test
+
+```{r}
+boxplot(y ~ department, data, pch = 16)
+```
+
+```{r}
+library(car)
+leveneTest(y ~ department, data = data, center = median)
+```
+
+A Brown–Forsythe (median-based Levene) test also strongly rejects the null hypothesis of equal variances across groups, indicating substantial heteroscedasticity associated with the qualitative covariate.
+
+## HC3 Robust Standard Errors
+
+```{r}
+library(sandwich)
+library(lmtest)
+
+coeftest(fit_lm, vcov = vcovHC(fit_lm, type = "HC3"))
+```
+
+Given strong evidence of heteroscedasticity, heteroscedasticity-robust (HC3) standard errors were used for inference. The results indicate that targeted productivity, task complexity (SMV), incentives, idle workers, style changes, and team size remain statistically significant predictors of productivity, while overtime and idle time do not exhibit significant effects.
+
+# 11: Heteroscedasticity Consistent Estimate
+
+Fit a multiple linear model with all available quantitative covariates. Calculate a suitable heteroscedasticity-consistent estimate for the covariance matrix of the regression coefficients. How does it compare against the corresponding ordinary least squares estimate? Calculate heteroscedastisticity-consistent t test statistics and 95% CIs for the regression coefficients. How do they compare against the results yielded by the ordinary least squares method?
+
+```{r}
+fit <- lm(actual_productivity^2 ~ targeted_productivity +
+            log_over_time + log_incentive + log_idle_time +
+            sqrt_smv + log_idle_men + no_of_workers,
+          data = data)
+
+summary(fit)
+```
+
+## OSL vs. HC Covariance Matrix
+
+```{r}
+vcov_OLS <- summary(fit)$sigma^2 * summary(fit)$cov.unscaled
+vcov_OLS
+```
+
+```{r}
+library(sandwich)
+vcov_HC3 <- vcovHC(fit, type = "HC3")
+vcov_HC3
+```
+
+```{r}
+se_OLS <- sqrt(diag(vcov_OLS))
+se_HC3 <- sqrt(diag(vcov_HC3))
+
+cbind(SE_OLS = se_OLS, SE_HC3 = se_HC3, ratio = se_HC3 / se_OLS)
+```
+
+OLS predicted too small of an SE for the intercept and targeted_productivity, and accurately predicted SE for log_over_time. OLS was too conservative for the other coefficients.
+
+## HC t-tests & 95% CIs
+
+```{r}
+ols_table <- summary(fit)$coefficients
+ols_table
+
+ols_ci <- confint(fit, level = 0.95)
+ols_ci
+```
+
+```{r}
+library(lmtest)
+
+hc3_tests <- coeftest(fit, vcov. = vcov_HC3)
+hc3_tests
+
+hc3_ci <- confint(hc3_tests, level = 0.95)
+hc3_ci
+```
+
+The HC3 95% confidence intervals are generally wider than their OLS counterparts, reflecting the increased variance captured by the robust estimator. For coefficients that were statistically significant under OLS, the HC3 intervals still exclude zero, reinforcing the stability of those effects. For non-significant predictors (log_over_time, log_idle_time, and the intercept), both OLS and HC3 confidence intervals include zero, with HC3 intervals being more conservative.
+
+# 12: Iteratively Reweighted Least Squares
+
+```{r}
+fit <- lm(actual_productivity^2 ~ targeted_productivity +
+            log_over_time + log_incentive + log_idle_time +
+            sqrt_smv + log_idle_men + no_of_workers,
+          data = data)
+
+residuals <- fit$residuals
+n <- nrow(data)
+
+w <- rep(1, n)
+err <- Inf
+tol <- 1e-10
+niter <- 0
+maxiter <- 1e3
+
+while (err > tol & niter < maxiter)
+{
+  aux <- lm(log(residuals^2) ~ log(targeted_productivity), data)
+  err <- sum(abs(w - exp(-aux$fitted.values))) / sum(w)
+  w <- exp(-aux$fitted.values)
+
+  WLS <- lm(actual_productivity^2 ~ targeted_productivity +
+              log_over_time + log_incentive + log_idle_time +
+              sqrt_smv + log_idle_men + no_of_workers,
+            data = data, weights = w)
+
+  residuals <- WLS$residuals
+  niter <- niter + 1
+}
+
+summary(aux)  
+summary(WLS)  
+
+```
+
+The auxiliary model results show a significant negative relationship between the squared residuals and targeted productivity, meaning that variance decreases as targeted productivity increases. Specifically, the variance is inversely proportional to targeted productivity raised to a power of approximately 0.85 — meaning the variance follows a decreasing power-law function of targeted productivity. This justifies using inverse-variance weighting in the iterative reweighted least squares procedure to correct for heteroscedasticity.
+
+The auxiliary IRLS regression reveals a statistically significant relationship between the variance of the random error terms and targeted productivity, with residual variance decreasing as targeted productivity increases. This provides justification for the use of iteratively reweighted least squares. Using the optimal weights obtained from IRLS, a weighted least squares model was fit with all available quantitative covariates. Compared to ordinary least squares, the WLS covariance matrix yields different standard error estimates, with several coefficients exhibiting reduced uncertainty, indicating improved efficiency. The main conclusions remain consistent across methods: targeted productivity, log incentive, sqrt smv, log idle men, and number of workers remain statistically significant, while log over time and log idle time do not. Overall, WLS provides more reliable and efficient inference than OLS by explicitly modeling nonconstant error variance.
+
+# 13: Multiple Comparisons
+
+```{r}
+library(lattice)
+alpha = 0.05
+Y = data$actual_productivity^2
+data$date <- factor(data$date)
+Q = data$date
+n = length(Q)
+K = length(levels(Q))
+mu = aggregate(actual_productivity^2 ~ date, data, mean)[, 2]
+sigma = sqrt(sum((Y - mu[Q])^2)/(n - K))
+SE = sigma * sqrt(2 * K/n)
+diff = outer(mu, mu, "-")
+diff = diff[lower.tri(diff)]
+lab = outer(levels(Q), levels(Q), function(x, y) {
+  paste0(x, "-", y)
+})
+names(diff) = lab[lower.tri(lab)]
+
+# Unadjusted CIs
+CI = cbind(diff - qt(1 - alpha/2, n - K) * SE, diff + qt(1 - alpha/2, n - K) * SE)
+colnames(CI) = c("Lower Bound", "Upper Bound")
+print(CI)
+```
+
+# Scheffé's method
+
+```{r}
+Scheffe = cbind(diff - sqrt((K - 1) * qf(1 - alpha, K - 1, n - K)) * SE, 
+                diff + sqrt((K - 1) * qf(1 - alpha, K - 1, n - K)) * SE)
+colnames(Scheffe) = c("Lower Bound", "Upper Bound")
+print(Scheffe)
+```
+
+# Tukey's HSD method
+
+```{r}
+Tukey = cbind(diff - qtukey(1 - alpha, K, n - K) * SE/sqrt(2), 
+              diff + qtukey(1 - alpha, K, n - K) * SE/sqrt(2))
+colnames(Tukey) = c("Lower Bound", "Upper Bound")
+print(Tukey)
+
+TukeyHSD(aov(actual_productivity^2 ~ date, data))
+```
+
+For both tests, every interval has a negative lower bound and positive upper bound, meaning they all include zero, so none are statistically significant. Looking at the results: Scheffé's method is overly conservative, resulting in none of the differences in actual productivity being declared statistically significant. Tukey's HSD method is more powerful but still results in none of the differences being declared statistically significant while correcting the multiple comparisons problem. Without any adjustment for multiple comparisons, zero differences would be declared significant. This suggests that the average squared actual productivity does not differ significantly across different dates at the 95% global confidence level, regardless of the adjustment method used.
+
+# 14: Multiple Linear Model
+
+```{r}
+# Get p-values from the model
+fit = lm(actual_productivity^2 ~ targeted_productivity + log_over_time + 
+         log_incentive + log_idle_time + sqrt_smv + log_idle_men + 
+         no_of_workers + team + department + date, data)
+
+pvalues = summary(fit)$coefficients[-1, 4]
+m = length(pvalues)
+alpha = 0.05
+
+# 1. Bonferroni test
+Bonf = min(pvalues)
+cat("Bonferroni test rejects H0:", Bonf < alpha/m, "\n")
+
+# 2. Fisher's combination test
+Fisher = -2 * sum(log(pvalues))
+cat("Fisher test rejects H0:", Fisher > qchisq(1 - alpha, 2 * m), "\n")
+
+# 3. Simes test
+Simes = sum(pvalues[order(pvalues)] <= (1:m) * alpha/m)
+cat("Simes test rejects H0:", Simes > 0, "\n")
+```
+
+Bonferroni is the most conservative method, controlling the family-wise error rate by testing each p-value against α/m. It assumes independence but remains valid (though overly strict) under positive dependence.
+
+Fisher’s combination test aggregates p-values using −2∑log(p), which follows a chi-square distribution under independence. It is more powerful than Bonferroni when multiple weak effects exist but requires independent p-values.
+
+Simes test is less conservative than Bonferroni but more powerful; it rejects if at least one ordered p-value is ≤ (i)α/m. It is valid under positive dependence and is often used in genomics and high-dimensional testing.
+
+All three rejected H₀ here, suggesting strong evidence of at least one significant predictor. Given that p-valus come from a multiple regression with correlated predictors, Bonferroni remains valid but conservative, Fisher’s independence assumption may be violated, and Simes is likely the most appropriate due to its robustness under positive dependence.
+
+# 15: Multiple Testing Methods - FWER AND FDR Control at 5% level
+
+```{r}
+# Apply multiple testing methods
+
+pvalues = summary(fit)$coefficients[-1, 4]
+m = length(pvalues)
+alpha = 0.05
+
+# Holm-Bonferroni (controls FWER)
+HB = p.adjust(pvalues, "holm")
+sum(HB < alpha)
+
+# Benjamini-Hochberg (controls FDR)
+BH = p.adjust(pvalues, "BH")
+sum(BH < alpha)
+
+# Benjamini-Yekutieli (controls FDR under any dependence)
+BY = p.adjust(pvalues, "BY")
+sum(BY < alpha)
+
+# Unadjusted (for comparison)
+sum(pvalues < alpha)
+```
+
+The Holm-Bonferroni procedure controls FWER, so it's overly conservative resulting in only 10 rejections. The Benjamini-Hochberg procedure controls FDR, so it's generally more powerful resulting in 13 rejections. However, the Benjamini-Hochberg procedure is only valid in the absence of any negative dependence among the tests being performed. The Benjamini-Yekutieli procedure still controls FDR while offering an adjustment which is valid under any form of dependence, so it's more conservative and results in 10 rejections. Discounting the multiple testing problem would lead to 14 rejections many of which would likely be false. Benjamini-Hochberg is the most powerful method here, detecting 3 more significant effects than Holm-Bonferroni. Benjamini-Yekutieli ends up with the same number of rejections as Holm-Bonferroni even though it controls FDR instead of FWER, which shows the adjustment for dependence structure makes it much more conservative.
+
+# 16: Final Model Specification and Inference Strategy
+
+Based on analyses from problems 1-15, the final model is a **mixed-effects model**:
+
+```         
+actual_productivity² ~ targeted_productivity + log_over_time + log_incentive + 
+                       log_idle_time + sqrt_smv + log_idle_men + no_of_workers +
+                       (1|team) + (1|department) + (1|date)
+```
+
+## Model Components
+
+**Response Transformation (Problem 4)**
+
+Use actual_productivity². Box-Cox analysis indicated λ ≈ 2.0 (95% CI: [1.7, 2.3]).
+
+**Covariate Transformations (Problem 4)**
+
+-   log_over_time = log(over_time + 1)
+-   log_incentive = log(incentive + 1)
+-   log_idle_time = log(idle_time + 1)
+-   sqrt_smv = sqrt(smv)
+-   log_idle_men = log(idle_men + 1)
+-   targeted_productivity, no_of_workers: no transformation
+
+**Fixed Effects**
+
+All quantitative covariates: targeted_productivity, log_over_time, log_incentive, log_idle_time, sqrt_smv, log_idle_men, no_of_workers.
+
+**Random Effects (Problem 9)**
+
+Random intercepts for team, department, and date. ICC analysis showed: - Department: 42.09% of total variation - Team: 3.03% of total variation - Date: 2.57% of total variation - Residual: 52.32% of total variation
+
+This accounts for clustering—observations from the same team/department/date are correlated.
+
+## Why Mixed-Effects Model?
+
+1.  **Clustering**: Observations within teams/departments/dates are correlated, violating independence.
+2.  **Heteroscedasticity (Problems 10, 11, 12)**: Breusch-Pagan test rejected homoscedasticity (p \< 2.2e-16). Random effects absorb 47.68% of variation, reducing residual heteroscedasticity.
+3.  **Parsimony**: Captures team-level variation (Problem 8 interactions) through random intercepts rather than 24+ interaction parameters.
+
+## Inference Strategy
+
+**1. Fixed Effects Testing (Problem 9)**
+
+Use likelihood ratio tests with REML=FALSE:
+
+``` r
+full = lmer(y ~ targeted_productivity + log_over_time + log_incentive + 
+            log_idle_time + sqrt_smv + log_idle_men + no_of_workers +
+            (1|team) + (1|department) + (1|date), data, REML=FALSE)
+
+reduced = lmer(y ~ [exclude one covariate] + (1|team) + (1|department) + (1|date), 
+               data, REML=FALSE)
+
+LR = -2 * (logLik(reduced) - logLik(full))
+pvalue = pchisq(LR, df=1, lower.tail=FALSE)
+```
+
+Problem 9 results: - **Significant (p \< 0.05)**: targeted_productivity, log_incentive, sqrt_smv, no_of_workers - **Not significant**: log_over_time, log_idle_time, log_idle_men
+
+**2. Multiple Testing Correction (Problem 14)**
+
+Apply Benjamini-Hochberg (FDR control) or Holm-Bonferroni (FWER control):
+
+``` r
+pvalues = [extract from LR tests]
+adjusted_p = p.adjust(pvalues, method="BH")
+```
+
+Problem 14 results at α = 0.05: - Holm-Bonferroni: 10 rejections - Benjamini-Hochberg: 13 rejections - Benjamini-Yekutieli: 10 rejections
+
+**3. Global Hypothesis Testing (Problem 14)**
+
+Test H₀: all β = 0 using three methods:
+
+``` r
+# Bonferroni
+Bonf = min(pvalues) < alpha/m
+
+# Fisher's combination
+Fisher = -2 * sum(log(pvalues)) > qchisq(1 - alpha, 2*m)
+
+# Simes
+Simes = sum(pvalues[order(pvalues)] <= (1:m) * alpha/m) > 0
+```
+
+All three rejected H₀, confirming at least one significant effect exists.
+
+**4. Confidence Intervals**
+
+Use profile likelihood for 95% CIs:
+
+``` r
+confint(full, method="profile", level=0.95)
+```
+
+Profile likelihood intervals account for uncertainty in variance components, unlike Wald intervals.
+
+**5. Model Diagnostics**
+
+-   Check Q-Q plot for residual normality (Problem 4)
+-   Verify no patterns in residuals vs fitted values
+-   Cross-validate on train/validation/test split (Problem 5)
+
+## Additional Considerations
+
+**Problem 11 (HC3 Robust SE)**: If fitting as linear model, use HC3 heteroscedasticity-consistent standard errors. However, this doesn't account for clustering, so mixed-effects model is preferred.
+
+**Problem 12 (WLS)**: IRLS showed variance depends on targeted_productivity. Mixed-effects random intercepts already absorb this, so additional weighting unnecessary.
+
+**Problem 13 (Multiple Comparisons)**: Tukey's HSD found no significant pairwise differences across dates, justifying date as random effect rather than fixed.
+
+## Conclusion
+
+The mixed-effects model addresses: - **Non-normality**: Response transformation (λ = 2) - **Non-linearity**: Covariate transformations - **Heteroscedasticity**: Random effects absorb variation - **Clustering**: Random intercepts for team/department/date - **Multiple testing**: Benjamini-Hochberg or Holm-Bonferroni correction
+
+Inference uses likelihood ratio tests with FDR/FWER control and profile likelihood CIs. This ensures valid conclusions about productivity factors while accounting for data structure and assumption violations.
